@@ -10,7 +10,8 @@ class Card:
         self.value = value
         
     def __str__(self):
-        return self.rank + " of " + self.color
+        # return self.rank + " of " + self.color
+        return self.rank
         
     def __eq__(self, other):
         return self.color == other.color and self.rank == other.rank
@@ -86,7 +87,8 @@ class BasicStrategyPlayer(Player):
         if pval < 17:
             return Action.HIT
         return Action.STAND
-        
+
+
 MCTS_N = 100
         
 class MCTSPlayer(Player):
@@ -124,7 +126,7 @@ class MCTSPlayer(Player):
         
             # The rollout player stores its action history, we reset this first
             p.reset()
-            
+
             # continue_round allows us to pass a partial game state (which cards we have, what the open 
             # card of the dealer is, and how much we've bet), and continue the game from there 
             # i.e. the game will *not* deal us two new cards, but instead use the ones we already have 
@@ -158,6 +160,22 @@ class MCTSPlayer(Player):
         return act
     def reset(self):
         self.bet = 2
+
+
+class Node:
+    def __init__(self, action, parent, children, game, expanded, result):
+        self.action = action
+        self.parent = parent
+        self.children = children
+        self.game = game
+        self.expanded = expanded
+        self.result = result
+
+class Tree:
+    def __init__(self, root_node):
+        self.root = root_node
+        self.nodes = [root_node]
+
         
 class RolloutPlayer(Player):
     """
@@ -167,13 +185,52 @@ class RolloutPlayer(Player):
         self.name = name
         self.actions = []
         self.deck = deck
-    def get_action(self, cards, actions, dealer_cards):
-        act = random.choice(actions)
-        self.actions.append(act)
-        return act
+        self.tree = Tree(root_node=Node(action=None, parent=None, children=None, game=None, expanded=False, result=None))
     def reset(self):
         self.actions = []
-        
+        self.tree = Tree(root_node=Node(action=None, parent=None, children=None, game=None, expanded=False, result=None))
+
+    def get_action(self, cards, actions, dealer_cards):
+        # act = random.choice(actions)
+        # self.actions.append(act)
+
+        root = self.tree.root
+        game = Game(self.deck, self, verbose=False)
+
+        # expand the current 'root', adding the newly created nodes to its children and the nodes list
+        for a in actions:
+            new_node = Node(action=a, parent=root, children=None, game=game, expanded=False, result=None)
+            if(root.children == None):
+                root.children = [new_node]
+            else:  
+                root.children.append(new_node)
+            self.tree.nodes.append(new_node)
+            root.expanded = True
+
+        # for all unexpanded nodes, set 'root' to the node and call continue_round
+        for node in self.tree.nodes:
+            if(not node.expanded):
+                game = Game(self.deck, self, verbose=False)
+                self.tree.root = node
+                node.result = game.continue_round(cards, dealer_cards, 2)
+
+        # decide on action
+        highest_res = -1000
+        target_node = None
+        for n in self.tree.nodes:
+            if(n.result > highest_res):
+                highest_res = n.result
+                target_node = n
+
+        # backtrack
+        cur = target_node
+        while(cur.parent != root):
+            cur = cur.parent
+
+        return cur.action
+
+
+
 class ConsolePlayer(Player):
     def get_action(self, cards, actions, dealer_cards):
         print()
