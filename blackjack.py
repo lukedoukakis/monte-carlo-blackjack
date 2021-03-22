@@ -93,11 +93,9 @@ MCTS_N = 100
         
 class MCTSPlayer(Player):
     """
-    This is only a demonstration, not *actual* Monte Carlo Tree Search!
-    
-    This agent will run MCTS_N simulations. For each simulation, the cards the player has not yet seen are shuffled and used as the assumed deck. Then the `RolloutPlayer` plays MCTS_N games starting from that random shuffle 
-    The agent will only remember the *first* action taken by the `RolloutPlayer` and how many points where obtained 
-    on average for each possible action.
+    This agent will run MCTS_N simulations. For each simulation, the cards the player has not yet seen are shuffled and used as the assumed deck. Then the RolloutPlayer plays MCTS_N games starting from that random shuffle.
+    For each of MCTS_N iterations, the agent will construct an MCT containing all of its possible actions, as well as their expected values after simulating the rest of the game with random rollout actions.
+    These expected values are recorded after each iteration, and the action that yielded the highest average expected value is chosen.
     """
     def __init__(self, name, deck):
         self.name = name
@@ -116,40 +114,42 @@ class MCTSPlayer(Player):
         
         # For each of our simulations we use the rollout player. 
         # Our Rollout Player selects actions at random, and records what it did (!)
-        p = RolloutPlayer("Rollout", deck)
+        p = RolloutPlayer("Rollout", deck, self.bet)
         
         # We create a new game object with the reduced deck, played by our rollout player
         g1 = Game(deck, p, verbose=False)
         
         results = {}
+        # print("MCTS_N SIMULATIONS START")
+        # print("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
         for i in range(MCTS_N):
-        
-            # The rollout player stores its action history, we reset this first
+
+            # print("MCTS_N ITERATION: ", i)
+
+            # reset our rollout player to blank state
             p.reset()
 
-            # continue_round allows us to pass a partial game state (which cards we have, what the open 
-            # card of the dealer is, and how much we've bet), and continue the game from there 
-            # i.e. the game will *not* deal us two new cards, but instead use the ones we already have 
-            # It will, however, then run as normal, calling `get_action` on the player object we passed earlier,
-            # which is our rollout_player
-            # The return value is the amount of money the agent won, across *all* hands (if they split)
-            res = g1.continue_round(cards, dealer_cards, self.bet)
-            
-            # After we are done, we extract the first action we took
-            act = p.actions[0]
-            
-            # Record the result for each possible action
-            if act not in results:
-                results[act] = []
-            results[act].append(res)
-        
+            # call get_action on rollout player, where a tree rooting from the current game state is constructed
+            actions_avail = [Action.HIT, Action.STAND, Action.DOUBLE_DOWN]
+            if len(cards) == 2 and g1.split_rule(cards[0], cards[1]):
+                actions.append(Action.SPLIT)
+            p.get_action(cards, actions_avail, dealer_cards)
+
+            # increment results in our actions dictionary based on scores from the simulations
+            tree = p.tree
+            for node in tree.nodes:
+                if(node.action != None):
+                    action = node.action
+                    results[action] = results.get(action, 0) + node.expected_value
+
+        # print("MCTS_N SIMULATIONS END")
+        # print()
+
         # Calculate the action with the highest *average* return
-        max = -1000
+        max = -1000000
         act = Action.STAND
-        avgs = {}
         for a in results:
-            score = sum(results[a])*1.0/len(results[a])
-            avgs[a] = score
+            score = results[a]
             if score > max:
                 max = score
                 act = a
@@ -157,79 +157,75 @@ class MCTSPlayer(Player):
         # Make sure we also record our own bet in case we double down (!)
         if act == Action.DOUBLE_DOWN:
             self.bet *= 2
+
+
+        # print("results:")
+        # print(results)
+        # print("    -> Chosen action: ", act)
+        
         return act
+
     def reset(self):
         self.bet = 2
 
 
-class Node:
-    def __init__(self, action, parent, children, game, expanded, result):
-        self.action = action
-        self.parent = parent
-        self.children = children
-        self.game = game
-        self.expanded = expanded
-        self.result = result
-
-class Tree:
-    def __init__(self, root_node):
-        self.root = root_node
-        self.nodes = [root_node]
-
-        
-class RolloutPlayer(Player):
+class FirstActionPlayer(Player):
     """
-    Used by the MCTS Player to perform rollouts: play randomly and record actions
+    Player whose first action will be first_action, then chooses random actions
     """
-    def __init__(self, name, deck):
+    def __init__(self, name, deck, first_action):
         self.name = name
         self.actions = []
         self.deck = deck
-        self.tree = Tree(root_node=Node(action=None, parent=None, children=None, game=None, expanded=False, result=None))
+        self.first_action = first_action
+    def get_action(self, cards, actions, dealer_cards):
+        if(not actions):
+            act = self.first_action
+        else:
+            act = random.choice(actions)
+        self.actions.append(act)
+        return act
     def reset(self):
         self.actions = []
-        self.tree = Tree(root_node=Node(action=None, parent=None, children=None, game=None, expanded=False, result=None))
 
+
+class Node:
+    def __init__(self, action, expected_value):
+        self.action = action
+        self.expected_value = expected_value
+
+class Tree:
+    def __init__(self):
+        self.root = None
+        self.nodes = None
+
+
+
+class RolloutPlayer(Player):
+    """
+    Used by the MCTS Player to construct an MCT
+    """
+    def __init__(self, name, deck, bet):
+        self.name = name
+        self.actions = []
+        self.deck = deck
+        self.tree = Tree()
+        self.bet = bet
+    def reset(self):
+        self.actions = []
+        self.tree = Tree()
     def get_action(self, cards, actions, dealer_cards):
-        # act = random.choice(actions)
-        # self.actions.append(act)
+        tree = self.tree
+        root = Node(action=None, expected_value=None)
+        tree.root = root
+        tree.nodes = [root]
 
-        root = self.tree.root
-        game = Game(self.deck, self, verbose=False)
-
-        # expand the current 'root', adding the newly created nodes to its children and the nodes list
+        # for each action, create a game with a FirstActionPlayer with its first action assigned as that action, and simulate the game to get an expected value, storing this info into a new node
         for a in actions:
-            new_node = Node(action=a, parent=root, children=None, game=game, expanded=False, result=None)
-            if(root.children == None):
-                root.children = [new_node]
-            else:  
-                root.children.append(new_node)
-            self.tree.nodes.append(new_node)
-            root.expanded = True
-
-        # for all unexpanded nodes, set 'root' to the node and call continue_round
-        for node in self.tree.nodes:
-            if(not node.expanded):
-                game = Game(self.deck, self, verbose=False)
-                self.tree.root = node
-                node.result = game.continue_round(cards, dealer_cards, 2)
-
-        # decide on action
-        highest_res = -1000
-        target_node = None
-        for n in self.tree.nodes:
-            if(n.result > highest_res):
-                highest_res = n.result
-                target_node = n
-
-        # backtrack
-        cur = target_node
-        while(cur.parent != root):
-            cur = cur.parent
-
-        return cur.action
-
-
+            fap = FirstActionPlayer("FirstAction", self.deck[:], a)
+            game = Game(self.deck[:], fap)
+            tree.nodes.append(Node(action=a, expected_value=game.continue_round(cards[:], dealer_cards[:], self.bet)))
+        return -1
 
 class ConsolePlayer(Player):
     def get_action(self, cards, actions, dealer_cards):
@@ -267,7 +263,7 @@ def same_value(a, b):
     return a.value == b.value
 
 class Game:
-    def __init__(self, cards, player, split_rule=same_value, verbose=True):
+    def __init__(self, cards, player, split_rule=same_value, verbose=False):
         self.cards = cards 
         self.player = player
         self.dealer = Dealer()
@@ -411,7 +407,7 @@ deck_types = {"default": generate_deck(),
               "red": generate_deck(suits=["Diamonds", "Hearts"]),
               "random": generate_deck(ranks=random.sample([("2",2), ("3",3), ("4",4), ("5",5), ("6",6), ("7",7), ("8",8), ("9",9), ("10",10), ("Jack",10), ("Queen",10), ("King",10), ("Ace",11)], random.randint(5,13)))}
 
-def main(ptype="default", dtype="default", n=100, split_rule=same_value, verbose=True):
+def main(ptype="default", dtype="default", n=100, split_rule=same_value, verbose=False):
     deck = deck_types[dtype]
     g = Game(deck, player_types[ptype]("Sir Gladington III, Esq.", deck[:]), split_rule, verbose)
     points = []
@@ -425,7 +421,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Run a simulation of a Blackjack agent.')
     parser.add_argument('player', nargs="?", default="default", 
                         help='the player type (available values: %s)'%(", ".join(player_types.keys())))
-    parser.add_argument('-n', '--count', dest='count', action='store', default=100,
+    parser.add_argument('-n', '--count', dest='count', action='store', default=10000,
                         help='How many games to run')
     parser.add_argument('-s', '-q', '--silent', '--quiet', dest='verbose', action='store_const', default=True, const=False,
                         help='Do not print game output (only average score at the end is printed)')
