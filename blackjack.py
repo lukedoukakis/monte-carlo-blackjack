@@ -10,8 +10,7 @@ class Card:
         self.value = value
         
     def __str__(self):
-        # return self.rank + " of " + self.color
-        return self.rank
+        return self.rank + " of " + self.color
         
     def __eq__(self, other):
         return self.color == other.color and self.rank == other.rank
@@ -89,13 +88,10 @@ class BasicStrategyPlayer(Player):
         return Action.STAND
 
 
-MCTS_N = 100
+MCTS_N = 10000
         
 class MCTSPlayer(Player):
     """
-    This agent will run MCTS_N simulations. For each simulation, the cards the player has not yet seen are shuffled and used as the assumed deck. Then the RolloutPlayer plays MCTS_N games starting from that random shuffle.
-    For each of MCTS_N iterations, the agent will construct an MCT containing all of its possible actions, as well as their expected values after simulating the rest of the game with random rollout actions.
-    These expected values are recorded after each iteration, and the action that yielded the highest average expected value is chosen.
     """
     def __init__(self, name, deck):
         self.name = name
@@ -111,76 +107,72 @@ class MCTSPlayer(Player):
             deck.remove(p)
         for p in dealer_cards:
             deck.remove(p)
-        
-        # For each of our simulations we use the rollout player. 
-        # Our Rollout Player selects actions at random, and records what it did (!)
-        p = RolloutPlayer("Rollout", deck, self.bet)
-        
-        # We create a new game object with the reduced deck, played by our rollout player
-        g1 = Game(deck, p, verbose=False)
-        
-        results = {}
-        # print("MCTS_N SIMULATIONS START")
-        # print("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
+
+        # initialize tree and expansion candidates
+        tree = Tree()
+        root = tree.root
+        expansion_candidates = [root]
+
         for i in range(MCTS_N):
 
-            # print("MCTS_N ITERATION: ", i)
-
-            # reset our rollout player to blank state
-            p.reset()
-
-            # call get_action on rollout player, where a tree rooting from the current game state is constructed
+            # choose expansion candidate based on highest expected value
+            expansion_node = expansion_candidates[0]
+            highest_expected = expansion_node.expected_value
+            for node in expansion_candidates:
+                if(node.expected_value > highest_expected):
+                    expansion_node = node
+                    expansion_candidates.remove(node)
+     
+            # expand selected node, perform intitial rollout for children, and add them to expansion candidates
             actions_avail = [Action.HIT, Action.STAND, Action.DOUBLE_DOWN]
-            if len(cards) == 2 and g1.split_rule(cards[0], cards[1]):
+            if len(cards) == 2 and cards[0] == cards[1]:
                 actions.append(Action.SPLIT)
-            p.get_action(cards, actions_avail, dealer_cards)
+            for a in actions_avail:
+                action_seq = expansion_node.action_sequence + [a]
+                sp = SequencePlayer("Sequence", self.deck[:], action_seq)
+                new_node = Node(parent = expansion_node, children = [], action_sequence = action_seq, expected_value = 0)
+                new_game = Game(self.deck[:], sp)
+                new_node.expected_value = new_game.continue_round(cards, dealer_cards, self.bet)
+                expansion_candidates.append(new_node)
+                expansion_node.children.append(new_node)
+                tree.nodes.append(new_node)
 
-            # increment results in our actions dictionary based on scores from the simulations
-            tree = p.tree
-            for node in tree.nodes:
-                if(node.action != None):
-                    action = node.action
-                    results[action] = results.get(action, 0) + node.expected_value
+                # back-propagate to update nodes further up the tree with expected value
+                parent = expansion_node
+                while(parent != None):
+                    parent.expected_value += new_node.expected_value
+                    parent = parent.parent
 
-        # print("MCTS_N SIMULATIONS END")
-        # print()
-
-        # Calculate the action with the highest *average* return
-        max = -1000000
+        # look through the root's children, pick the one with the highest expected value, and return its action
         act = Action.STAND
-        for a in results:
-            score = results[a]
-            if score > max:
-                max = score
-                act = a
-                
+        max = -100000
+        for node in root.children:
+            if(node.expected_value > max):
+                act = node.action_sequence[0]
+                max = node.expected_value
+
         # Make sure we also record our own bet in case we double down (!)
         if act == Action.DOUBLE_DOWN:
             self.bet *= 2
 
-
-        # print("results:")
-        # print(results)
-        # print("    -> Chosen action: ", act)
-        
         return act
 
     def reset(self):
         self.bet = 2
 
 
-class FirstActionPlayer(Player):
+class SequencePlayer(Player):
     """
-    Player whose first action will be first_action, then chooses random actions
+    Player whose first actions will be action_sequence, then chooses random actions
     """
-    def __init__(self, name, deck, first_action):
+    def __init__(self, name, deck, action_sequence):
         self.name = name
         self.actions = []
         self.deck = deck
-        self.first_action = first_action
+        self.action_sequence = action_sequence
     def get_action(self, cards, actions, dealer_cards):
-        if(not actions):
-            act = self.first_action
+        if(len(self.actions) < len(self.action_sequence)):
+            act = self.action_sequence[len(self.actions)]
         else:
             act = random.choice(actions)
         self.actions.append(act)
@@ -190,14 +182,16 @@ class FirstActionPlayer(Player):
 
 
 class Node:
-    def __init__(self, action, expected_value):
-        self.action = action
+    def __init__(self, parent, children, action_sequence, expected_value):
+        self.parent = parent
+        self.children = children
+        self.action_sequence = action_sequence
         self.expected_value = expected_value
 
 class Tree:
     def __init__(self):
-        self.root = None
-        self.nodes = None
+        self.root = Node(parent = None, children = [], action_sequence = [], expected_value = 0)
+        self.nodes = [self.root]
 
 
 
@@ -205,27 +199,16 @@ class RolloutPlayer(Player):
     """
     Used by the MCTS Player to construct an MCT
     """
-    def __init__(self, name, deck, bet):
+    def __init__(self, name, deck):
         self.name = name
         self.actions = []
         self.deck = deck
-        self.tree = Tree()
-        self.bet = bet
     def reset(self):
         self.actions = []
-        self.tree = Tree()
     def get_action(self, cards, actions, dealer_cards):
-        tree = self.tree
-        root = Node(action=None, expected_value=None)
-        tree.root = root
-        tree.nodes = [root]
-
-        # for each action, create a game with a FirstActionPlayer with its first action assigned as that action, and simulate the game to get an expected value, storing this info into a new node
-        for a in actions:
-            fap = FirstActionPlayer("FirstAction", self.deck[:], a)
-            game = Game(self.deck[:], fap)
-            tree.nodes.append(Node(action=a, expected_value=game.continue_round(cards[:], dealer_cards[:], self.bet)))
-        return -1
+        act = random.choice(actions)
+        self.actions.append(act)
+        return act
 
 class ConsolePlayer(Player):
     def get_action(self, cards, actions, dealer_cards):
@@ -263,7 +246,7 @@ def same_value(a, b):
     return a.value == b.value
 
 class Game:
-    def __init__(self, cards, player, split_rule=same_value, verbose=False):
+    def __init__(self, cards, player, split_rule=same_value, verbose=True):
         self.cards = cards 
         self.player = player
         self.dealer = Dealer()
@@ -407,7 +390,7 @@ deck_types = {"default": generate_deck(),
               "red": generate_deck(suits=["Diamonds", "Hearts"]),
               "random": generate_deck(ranks=random.sample([("2",2), ("3",3), ("4",4), ("5",5), ("6",6), ("7",7), ("8",8), ("9",9), ("10",10), ("Jack",10), ("Queen",10), ("King",10), ("Ace",11)], random.randint(5,13)))}
 
-def main(ptype="default", dtype="default", n=100, split_rule=same_value, verbose=False):
+def main(ptype="default", dtype="default", n=100, split_rule=same_value, verbose=True):
     deck = deck_types[dtype]
     g = Game(deck, player_types[ptype]("Sir Gladington III, Esq.", deck[:]), split_rule, verbose)
     points = []
